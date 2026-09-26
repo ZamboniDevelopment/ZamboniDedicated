@@ -15,6 +15,7 @@ internal static class Program
         var port = DefaultPort;
         var ticksPerSecond = DefaultTicksPerSecond;
         var maxClients = DefaultMaxClients;
+        var standalone = true;
 
         if (args.Length > 0)
         {
@@ -53,11 +54,22 @@ internal static class Program
 
             _loglevel = LogLevel.FromOrdinal(intLoglevel);
         }
+        
+        if (args.Length > 4)
+        {
+            if (!bool.TryParse(args[4], out standalone))
+            {
+                Console.WriteLine($"ERROR: Invalid standalone (true/false)");
+                return;
+            }
+        }
 
         StartLogger();
 
-        var server = new Dedicated(ticksPerSecond, maxClients, port);
+        var server = new Dedicated(ticksPerSecond, maxClients, port, standalone);
+        Console.WriteLine($"Starting Dedicated with Parameters: TPS: {ticksPerSecond}, MaxClients: {maxClients}, Port: {port}, LogLevel: {_loglevel}, Standalone: {standalone}");
 
+        
         var shutdownComplete = new ManualResetEventSlim(false);
         server.Stopped += _ => shutdownComplete.Set();
         server.Start();

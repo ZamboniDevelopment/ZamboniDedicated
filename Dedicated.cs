@@ -20,6 +20,10 @@ public sealed class Dedicated
     private readonly Player?[] _players;
     private readonly Roster _roster;
 
+    private readonly bool _standalone;
+    private readonly Dictionary<string, byte> _joiningPlayers = new();
+    public event Action<byte> PlayerLeavingAction;
+
     private readonly ConcurrentQueue<(IPEndPoint Sender, Packet Packet)> _incomingPacketQueue = new();
     public event Action<Dedicated>? Stopped;
     private readonly CancellationTokenSource _cts = new();
@@ -38,7 +42,7 @@ public sealed class Dedicated
 
     private int _consecutiveEmptyTicks;
 
-    public Dedicated(int ticksPerSecond, int maxClients, int port)
+    public Dedicated(int ticksPerSecond, int maxClients, int port, bool standalone)
     {
         _maxClients = maxClients;
 
@@ -47,6 +51,8 @@ public sealed class Dedicated
         _roster = new Roster();
 
         _tickPeriodMs = 1000.0 / ticksPerSecond;
+
+        _standalone = standalone;
     }
 
     public void Start()
@@ -169,25 +175,44 @@ public sealed class Dedicated
                     {
                         case SignalType.ConnectionRequest:
                         {
-                            var connectPacket = ConnectPacket.FromHeader(packet.Header);
-                            if (_players.Count(p => p is not null) >= _maxClients)
+                            if (_standalone)
                             {
-                                break;
+                                var connectPacket = ConnectPacket.FromHeader(packet.Header);
+                                if (_players.Count(p => p is not null) >= _maxClients)
+                                {
+                                    break;
+                                }
+
+                                if (player is not null)
+                                {
+                                    player.ReliableConnection.SendSignalPacket(new ConnectionAcceptPacket(connectPacket.PlayerIdentifier));
+                                    break;
+                                }
+
+                                byte slot = (byte)Array.IndexOf(_players, null);
+                                CreatePlayer(connectPacket.PlayerIdentifier, sender, slot);
+                            }
+                            else
+                            {
+                                var connectPacket = ConnectPacket.FromHeader(packet.Header);
+
+                                if (player is not null)
+                                {
+                                    player.ReliableConnection.SendSignalPacket(new ConnectionAcceptPacket(connectPacket.PlayerIdentifier));
+                                    break;
+                                }
+
+                                if (_joiningPlayers.TryGetValue(sender.Address.ToString(), out var slot))
+                                {
+                                    CreatePlayer(connectPacket.PlayerIdentifier, sender, slot);
+                                    _joiningPlayers.Remove(sender.Address.ToString());
+                                }
+                                else
+                                {
+                                    Logger.Debug($"Player [{sender}] tried to join, but he is not in JoiningPlayers");
+                                }
                             }
 
-                            if (player is not null)
-                            {
-                                player.ReliableConnection.SendSignalPacket(new ConnectionAcceptPacket(connectPacket.PlayerIdentifier));
-                                break;
-                            }
-
-                            int slot = Array.IndexOf(_players, null);
-                            var newPlayer = new Player(connectPacket.PlayerIdentifier, sender, _serverUdpClient, _clock);
-                            _players[slot] = newPlayer;
-
-                            newPlayer.ReliableConnection.SendSignalPacket(new ConnectionAcceptPacket(connectPacket.PlayerIdentifier));
-                            BroadcastRosterUpdate();
-                            Logger.Info($"Player {newPlayer} joined the server");
                             break;
                         }
                         case SignalType.Disconnect:
@@ -327,13 +352,30 @@ public sealed class Dedicated
         }
     }
 
+    private void CreatePlayer(uint playerIdentifier, IPEndPoint ipEndPoint, byte slot)
+    {
+        Logger.Info($"{playerIdentifier},  {ipEndPoint}, {slot}");
+        var newPlayer = new Player(playerIdentifier, ipEndPoint, _serverUdpClient, _clock);
+        _players[slot] = newPlayer;
+
+        newPlayer.ReliableConnection.SendSignalPacket(new ConnectionAcceptPacket(playerIdentifier));
+        BroadcastRosterUpdate();
+        Logger.Info($"Player {newPlayer} joined the server");
+    }
+
     private void RemovePlayer(Player player)
     {
+        byte index = (byte)Array.IndexOf(_players, player);
         _players[Array.IndexOf(_players, player)] = null;
         BroadcastRosterUpdate();
         if (!_players.Any(p => p is not null))
         {
             Stop();
+        }
+
+        if (!_standalone)
+        {
+            PlayerLeavingAction.Invoke(index);
         }
     }
 
@@ -355,6 +397,16 @@ public sealed class Dedicated
         return allReady;
     }
 
+    public bool AddJoiningPlayer(byte slot, string ipAddress)
+    {
+        if (_players.Count(p => p is not null) >= _maxClients)
+        {
+            return false;
+        }
+        _joiningPlayers.Add(ipAddress, slot);
+        return true;
+    }
+    
     private void BuildAndSendCombinedInputs()
     {
         var connected = _players.Where(p => p is not null).Cast<Player>().ToList();
